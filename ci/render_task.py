@@ -14,11 +14,22 @@ import paths
 
 NamedParam = tkn.model.NamedParam
 
+def multiline_str_presenter(dumper, data):
+    try:
+        dlen = len(data.splitlines())
+        if (dlen > 1):
+            return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    except TypeError as ex:
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--use-secrets-server', action='store_true')
     parser.add_argument('--outfile', default='tasks.yaml')
+    parser.add_argument('--giturl', default='https://github.com/gardenlinux/gardenlinux')
+    parser.add_argument('--minimal', action='store_true',  help='omit prebuild and promote steps')
 
     parsed = parser.parse_args()
 
@@ -35,9 +46,20 @@ def main():
         env_vars = []
         volume_mounts = []
 
+    base_build_task_yaml_path = os.path.join(paths.own_dir, 'baseimage_build_task.yaml.template')
+    with open(base_build_task_yaml_path) as f:
+        raw_base_build_task = yaml.safe_load(f)
+    
+    package_task = tasks.nokernel_package_task()
+    raw_package_task = dataclasses.asdict(package_task)
+
+    kernel_package_task = tasks.kernel_package_task()
+    raw_kernel_package_task = dataclasses.asdict(kernel_package_task)
+
     build_task_yaml_path = os.path.join(paths.own_dir, 'build-task.yaml.template')
     with open(build_task_yaml_path) as f:
         raw_build_task = yaml.safe_load(f)
+
 
     promote_task = tasks.promote_task(
         branch=NamedParam(name='branch'),
@@ -117,6 +139,7 @@ def main():
     raw_build_task['spec']['steps'][0] = clone_step_dict
     raw_build_task['spec']['steps'][1] = pre_build_step_dict
     raw_build_task['spec']['steps'][-1] = upload_step_dict
+
     raw_build_task['spec']['steps'].append(promote_step_dict)
     if not parsed.use_secrets_server:
         print(raw_build_task['spec']['volumes'])
@@ -127,8 +150,25 @@ def main():
             }
         })
 
+    # Take the template and dynamically set steps for build-base-image
+    raw_base_build_task['spec']['steps'][0] = clone_step_dict
+    if not parsed.use_secrets_server:
+        print(raw_base_build_task['spec']['volumes'])
+        raw_base_build_task['spec']['volumes'].append({
+            'name': 'secrets',
+            'secret': {
+                'secretname': 'secrets',
+            }
+        })
+
+    # Set a custom string representer so that script tags are rendered as 
+    # | block style 
+    # This should do the trick but add_representer has noeffect on safe dumper
+    # yaml.add_representer(str, multiline_str_presenter)
+    yaml.representer.SafeRepresenter.add_representer(str, multiline_str_presenter)
+
     with open(parsed.outfile, 'w') as f:
-        yaml.safe_dump_all((raw_build_task, raw_promote_task), f)
+        yaml.safe_dump_all((raw_base_build_task, raw_package_task, raw_kernel_package_task, raw_build_task, raw_promote_task), f)
 
     print(f'dumped tasks to {parsed.outfile}')
 

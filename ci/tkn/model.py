@@ -84,6 +84,7 @@ class PipelineTask:
     params: typing.List[NamedParam]
     workspaces: typing.List[Workspace] = dataclasses.field(default_factory=list)
     runAfter: typing.List[str] = dataclasses.field(default_factory=list)
+    timeout: str = "1h"
 
 
 @dataclasses.dataclass
@@ -115,6 +116,7 @@ class PipelineRef:
 @dataclasses.dataclass
 class PodTemplate:
     nodeSelector: dict
+    securityContext: dict
 
 
 @dataclasses.dataclass

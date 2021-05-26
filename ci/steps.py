@@ -4,10 +4,11 @@ import typing
 
 import tkn.model
 
-DEFAULT_IMAGE = 'eu.gcr.io/gardener-project/cc/job-image:1.788.0'
+DEFAULT_IMAGE = 'gardenerci/cc-job-image:1.1302.0'
 
 own_dir = os.path.abspath(os.path.dirname(__file__))
 scripts_dir = os.path.join(own_dir)
+steps_dir = os.path.join(own_dir, 'steps')
 
 
 def extend_python_path_snippet(param_name: str):
@@ -21,18 +22,28 @@ class ScriptType(enum.Enum):
 
 
 def task_step_script(
-    path: str,
     script_type: ScriptType,
     callable: str,
     params: typing.List[tkn.model.NamedParam],
     repo_path_param: typing.Optional[tkn.model.NamedParam]=None,
+    path: str = None,
+    inline_script: str = None,
 ):
     '''
     renders an inline-step-script, prepending a shebang, and appending an invocation
-    of the specified callable (passing the given params).
+    of the specified callable (passing the given params). Either use path to inline
+    script from a file or use inline inline_script to pass script directly
+
     '''
-    with open(path) as f:
-        script = f.read()
+
+    if path and inline_script:
+        raise ValueError("Either use path or inline_script but not both.")
+
+    if path:
+        with open(path) as f:
+            script = f.read()
+    elif inline_script:
+        script = inline_script
 
     if script_type is ScriptType.PYTHON3:
         shebang = '#!/usr/bin/env python3'
@@ -40,22 +51,30 @@ def task_step_script(
             preamble = 'import sys,os;' + extend_python_path_snippet(repo_path_param.name)
         else:
             preamble = ''
+
         args = ','.join((
             f"{param.name.replace('-', '_')}='$(params.{param.name})'" for param in params
         ))
         callable_str = f'{callable}({args})'
     elif script_type is ScriptType.BOURNE_SHELL:
-        shebang = '#!/usr/bin/env sh'
+        shebang = '#!/usr/bin/env bash'
         preamble = ''
         args = ' '.join(param.name for param in params)
         callable_str = 'f{callable} {args}'
 
-    return '\n'.join((
-        shebang,
-        preamble,
-        script,
-        callable_str,
-    ))
+    if callable:
+        return '\n'.join((
+            shebang,
+            preamble,
+            script,
+            callable_str,
+        ))
+    else:
+        return '\n'.join((
+            shebang,
+            preamble,
+            script,
+        ))
 
 
 def clone_step(
@@ -69,7 +88,7 @@ def clone_step(
         name='clone-repo-step',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'clone_repo_step.py'),
+            path=os.path.join(steps_dir, 'clone_repo_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='clone_and_copy',
             params=[
@@ -78,6 +97,36 @@ def clone_step(
                 repo_dir,
             ],
             repo_path_param=repo_dir,
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+    return step
+
+
+def cfssl_clone_step(
+    name: str,
+    cfssl_committish: tkn.model.NamedParam,
+    cfssl_git_url: tkn.model.NamedParam,
+    cfssl_dir: tkn.model.NamedParam,
+    gardenlinux_repo_path_param: tkn.model.NamedParam,
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    step = tkn.model.TaskStep(
+        name=name,
+        image=DEFAULT_IMAGE,
+        script=task_step_script(
+            script_type=ScriptType.PYTHON3,
+            path=os.path.join(steps_dir, 'clone_repo_step.py'),
+            callable='cfssl_clone',
+            params=[
+                cfssl_committish,
+                cfssl_git_url,
+                cfssl_dir,
+            ],
+            repo_path_param=gardenlinux_repo_path_param,
         ),
         volumeMounts=volume_mounts,
         env=env_vars,
@@ -104,7 +153,7 @@ def upload_results_step(
         name='upload-results',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'upload_results_step.py'),
+            path=os.path.join(steps_dir, 'upload_results_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='upload_results_step',
             params=[
@@ -142,7 +191,7 @@ def promote_single_step(
         name='promote-step',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'promote_step.py'),
+            path=os.path.join(steps_dir, 'promote_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='promote_single_step',
             params=[
@@ -177,7 +226,7 @@ def promote_step(
         name='finalise-promotion-step',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'promote_step.py'),
+            path=os.path.join(steps_dir, 'promote_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='promote_step',
             params=[
@@ -212,7 +261,7 @@ def pre_build_step(
         name='prebuild-step',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'pre_build_step.py'),
+            path=os.path.join(steps_dir, 'pre_build_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='pre_build_step',
             params=[
@@ -245,7 +294,7 @@ def release_step(
         name='release-step',
         image=DEFAULT_IMAGE,
         script=task_step_script(
-            path=os.path.join(scripts_dir, 'release_step.py'),
+            path=os.path.join(steps_dir, 'release_step.py'),
             script_type=ScriptType.PYTHON3,
             callable='release_step',
             params=[
@@ -273,3 +322,307 @@ def build_image_step(
     volume_mounts: typing.List[typing.Dict] = [],
 ):
     pass
+
+
+def build_cfssl_step(
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='build-cfssl-step',
+        image='golang:latest',
+        script=task_step_script(
+            inline_script='''
+set -e
+set -x
+
+mkdir -p $(params.repodir)/cert/cfssl
+if [ "$(params.cfssl_fastpath)" != "true" ]; then
+  # slow-path build CFSSL from github:
+  pushd $(params.cfssl_dir)
+  make
+  mv bin/* $(params.repodir)/cert/cfssl
+else
+  mkdir -p $(params.repodir)/bin
+  pushd $(params.repodir)/bin
+  # fast-path copy binaries from CFSSL github release:
+  cfssl_files=( cfssl-bundle_1.5.0_linux_amd64 \\
+    cfssl-certinfo_1.5.0_linux_amd64 \\
+    cfssl-newkey_1.5.0_linux_amd64 \\
+    cfssl-scan_1.5.0_linux_amd64 \\
+    cfssljson_1.5.0_linux_amd64 \\
+    cfssl_1.5.0_linux_amd64 \\
+    mkbundle_1.5.0_linux_amd64 \\
+    multirootca_1.5.0_linux_amd64 \\
+  )
+
+  len2=`expr length _1.5.0_linux_amd64`
+  for file in "${cfssl_files[@]}"; do
+    len=`expr length $file`
+    outname=${file:0:`expr $len - $len2`}
+    wget --no-verbose -O $outname https://github.com/cloudflare/cfssl/releases/download/v1.5.0/${file}
+    chmod +x $outname
+  done
+  mv * $(params.repodir)/cert/cfssl
+fi
+# cleanup workspace to safe some valuable space
+popd
+rm -rf $(params.cfssl_dir)
+''',
+            script_type=ScriptType.BOURNE_SHELL,
+            callable='',
+            params=[],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+
+def build_make_cert_step(
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='make-cert',
+        image='$(params.gardenlinux_build_deb_image)',
+        script=task_step_script(
+            inline_script='''
+set -e
+set -x
+cd $(params.repodir)/cert
+# Note: that make will also build cfssl which was here done in the previous step
+# it will skip this step as it already present, this is a bit fragile
+make
+''',
+            script_type=ScriptType.BOURNE_SHELL,
+            callable='',
+            params=[],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+
+def build_package_step(
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='build-package',
+        image='$(params.gardenlinux_build_deb_image)',
+        script=task_step_script(
+            inline_script='''
+set -e
+set -x
+
+repodir='$(params.repodir)'
+pkg_name="$(params.pkg_name)"
+
+if [ -z "$SOURCE_PATH" ]; then
+  SOURCE_PATH="$(readlink -f ${repodir})"
+fi
+
+if [ -z "${pkg_name}" ]; then
+  echo "ERROR: no package name given"
+  exit 1
+fi
+
+echo $(pwd)
+
+MANUALDIR=$(realpath $repodir/packages/manual)
+KERNELDIR=$(realpath $repodir/packages/kernel)
+CERTDIR=$(realpath $repodir/cert)
+
+export DEBFULLNAME="Garden Linux Maintainers"
+export DEBEMAIL="contact@gardenlinux.io"
+export BUILDIMAGE="gardenlinux/build-deb"
+export BUILDKERNEL="gardenlinux/build-kernel"
+echo "MANUALDIR: ${MANUALDIR}"
+echo "KERNELDIR: ${KERNELDIR}"
+echo "CERTDIR: ${CERTDIR}"
+ls -l ${CERTDIR}
+
+# original makefile uses mounts, replace this by linking required dirs
+# to the expexted locations:
+# original: mount <gardenlinuxdir>/.packages but this does not exist so just create
+mkdir /pool
+ls -l ${CERTDIR}
+ln -s ${MANUALDIR} /workspace/manual
+ln -s /../Makefile.inside /workspace/Makefile
+echo "$(gpgconf --list-dir agent-socket)"
+mkdir -p /workspace/.gnupg
+ln -s $(gpgconf --list-dir agent-socket) /workspace/.gnupg/S.gpg-agent
+ln -s ${CERTDIR}/sign.pub /sign.pub
+ln -s ${CERTDIR}/Kernel.sign.full /kernel.full
+ln -s ${CERTDIR}/Kernel.sign.crt /kernel.crt
+ln -s ${CERTDIR}/Kernel.sign.key /kernel.key
+ls -l /kernel.full
+
+pkg_build_script_path="$SOURCE_PATH/packages/manual/${pkg_name}"
+echo "pkg_build_script_path: ${pkg_build_script_path}"
+
+if [ ! -f "${pkg_build_script_path}" ]; then
+  echo "ERROR: Don't know how to build ${pkg_name}"
+  exit 1
+fi
+
+pkg_build_script_path="$(readlink -f ${pkg_build_script_path})"
+
+export BUILDTARGET="${OUT_PATH:-/workspace/pool}"
+if [ ! -f "$BUILDTARGET" ]; then
+  mkdir "$BUILDTARGET"
+fi
+
+cd "${BUILDTARGET}"
+
+${pkg_build_script_path}
+''',
+            script_type=ScriptType.BOURNE_SHELL,
+            callable='',
+            params=[],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+
+def build_kernel_package_step(
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='build-package',
+        image='$(params.gardenlinux_build_deb_image)',
+        script=task_step_script(
+            inline_script='''
+set -ex
+
+# split string into an array
+echo "Input: $(params.pkg_names)"
+IFS=', ' read -r -a packages <<< "$(params.pkg_names)"
+echo "Building kernel dependent packages: ${packages[@]}"
+
+repodir='$(params.repodir)'
+
+if [ -z "$SOURCE_PATH" ]; then
+  SOURCE_PATH="$(readlink -f ${repodir})"
+fi
+
+if [ -z "${packages}" ]; then
+  echo "ERROR: no package name given"
+  exit 1
+fi
+
+echo $(pwd)
+
+MANUALDIR=$(realpath $repodir/packages/manual)
+KERNELDIR=$(realpath $repodir/packages/kernel)
+CERTDIR=$(realpath $repodir/cert)
+
+export DEBFULLNAME="Garden Linux Maintainers"
+export DEBEMAIL="contact@gardenlinux.io"
+export BUILDIMAGE="gardenlinux/build-deb"
+export BUILDKERNEL="gardenlinux/build-kernel"
+echo "MANUALDIR: ${MANUALDIR}"
+echo "KERNELDIR: ${KERNELDIR}"
+echo "CERTDIR: ${CERTDIR}"
+ls -l ${CERTDIR}
+
+# original makefile uses mounts, replace this by linking required dirs
+# to the expexted locations:
+# original: mount <gardenlinuxdir>/.packages but this does not exist so just create
+mkdir /pool
+ls -l ${CERTDIR}
+ln -s ${MANUALDIR} /workspace/manual
+ln -s /../Makefile.inside /workspace/Makefile
+echo "$(gpgconf --list-dir agent-socket)"
+mkdir -p /workspace/.gnupg
+ln -s $(gpgconf --list-dir agent-socket) /workspace/.gnupg/S.gpg-agent
+ln -s ${CERTDIR}/sign.pub /sign.pub
+ln -s ${CERTDIR}/Kernel.sign.full /kernel.full
+ln -s ${CERTDIR}/Kernel.sign.crt /kernel.crt
+ln -s ${CERTDIR}/Kernel.sign.key /kernel.key
+ls -l /kernel.full
+
+sudo apt-get install --no-install-recommends -y wget quilt vim less
+
+export BUILDTARGET="${OUT_PATH:-/workspace/pool}"
+if [ ! -f "$BUILDTARGET" ]; then
+mkdir "$BUILDTARGET"
+fi
+
+for package in "${packages[@]}"
+do
+  echo "Building now ${package}"
+  pkg_build_script_path="$SOURCE_PATH/packages/manual/${package}"
+  echo "pkg_build_script_path: ${pkg_build_script_path}"
+
+  if [ ! -f "${pkg_build_script_path}" ]; then
+    echo "ERROR: Don't know how to build ${package}"
+    exit 1
+  fi
+
+  pkg_build_script_path="$(readlink -f ${pkg_build_script_path})"
+
+  pushd "${BUILDTARGET}"
+  ${pkg_build_script_path}
+  popd
+done
+''',
+            script_type=ScriptType.BOURNE_SHELL,
+            callable='',
+            params=[],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+
+def build_upload_packages_step(
+    repo_dir: tkn.model.NamedParam,
+    cicd_cfg_name: tkn.model.NamedParam,
+    s3_package_path: tkn.model.NamedParam,
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='upload-packages-s3',
+        image=DEFAULT_IMAGE,
+        script=task_step_script(
+            path=os.path.join(steps_dir, 'upload_packages.py'),
+            script_type=ScriptType.PYTHON3,
+            callable='upload_packages',
+            repo_path_param=repo_dir,
+            params=[
+                cicd_cfg_name,
+                s3_package_path,
+            ],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
+
+
+def build_publish_packages_repository_step(
+    cicd_cfg_name: tkn.model.NamedParam,
+    s3_package_path: tkn.model.NamedParam,
+    repo_dir: tkn.model.NamedParam,
+    env_vars: typing.List[typing.Dict] = [],
+    volume_mounts: typing.List[typing.Dict] = [],
+):
+    return tkn.model.TaskStep(
+        name='publish-package-repository-s3',
+        image='$(params.gardenlinux_build_deb_image)',
+        script=task_step_script(
+            path=os.path.join(steps_dir, 'publish_package_repository.py'),
+            script_type=ScriptType.PYTHON3,
+            callable='main',
+            repo_path_param=repo_dir,
+            params=[
+                cicd_cfg_name,
+                s3_package_path,
+            ],
+        ),
+        volumeMounts=volume_mounts,
+        env=env_vars,
+    )
